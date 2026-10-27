@@ -167,6 +167,13 @@ from powercontext.builtin.runtime._scope_cache import (
     ScopeEvictor,
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
+from powercontext.builtin.persistence.source_lifecycle import SourceLifecycleStore
+from powercontext.builtin.runtime.source_lifecycle import (
+    ScopedSourceLifecycleApplication,
+    SourceLifecycleApplication,
+    SourceLifecycleError,
+    SourceLifecycleEvent,
+)
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
 from powercontext.builtin.runtime.models import (
     ApproveArtifactCandidateRequest,
@@ -489,6 +496,7 @@ class ScopedSourceApplication:
                             span.set_attributes({_MEMORY_CAPTURE_SOURCE_COUNT: 1})
             except BaseValueConflictError as error:
                 raise SourceConflictError("identity", error.identity) from None
+            self._runtime._wake_source_processing()
             return SourceReceipt(
                 source_ref=SourceRef(source_type=record.source_type, source_id=record.source_id),
                 sequence=record.position,
@@ -505,6 +513,7 @@ class ScopedSourceApplication:
                 )
                 if span is not None:
                     span.set_attributes({_MEMORY_CAPTURE_SOURCE_COUNT: 1})
+            self._runtime._wake_source_processing()
             return SourceReceipt(source_ref=context.sources.catalog.as_ref(source), sequence=sequence)
 
 
@@ -564,7 +573,12 @@ class ScopedRecordApplication:
         /,
     ) -> ArtifactCreated:
         async with self._runtime._scope_operation(self.scope_id), self._runtime._locked(self.scope_id):
-            return await self._runtime._records().create_artifact(self.scope_id, family, write)
+            created = await self._runtime._records().create_artifact(self.scope_id, family, write)
+        # Every committed Artifact Create publishes its own lineage-only Source,
+        # which owns a journal identity even though it is never generation
+        # evidence. Count admission observes it like any other identity.
+        self._runtime._wake_source_processing()
+        return created
 
     async def get_artifact(self, family: str, artifact_id: str, /) -> ArtifactRecord:
         async with self._runtime._scope_operation(self.scope_id):
@@ -2683,6 +2697,17 @@ class ScopedTopicMemoryApplication:
                     query_embedding,
                     embedding_timeout_seconds,
                 )
+        unsupported = await self._runtime.lifecycle.unsupported_topics(self.scope_id)
+        if unsupported:
+            result = result.model_copy(
+                update={
+                    "hits": tuple(
+                        hit
+                        for hit in result.hits
+                        if (hit.artifact_ref.artifact_id, hit.artifact_ref.revision) not in unsupported
+                    )
+                }
+            )
         observer = self._runtime._topic_memory_search_observer
         if observer is not None:
             try:
@@ -3043,6 +3068,7 @@ class BuiltinRuntime:
         remote_ingestion: RemoteIngestion | None = None,
         dream_service: DreamService | None = None,
         generation_concurrency: int = 4,
+        source_lifecycle_store: SourceLifecycleStore | None = None,
     ) -> None:
         if source_window_limit < 1:
             raise _RuntimeConfigurationError("source_window_limit")
@@ -3125,6 +3151,7 @@ class BuiltinRuntime:
         self.handoff = HandoffApplication(self)
         self.work = WorkApplication(self)
         self.memory = MemoryApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self, source_lifecycle_store)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
         self.prompts = PromptApplication(self)
@@ -3144,6 +3171,27 @@ class BuiltinRuntime:
 
     async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         await self.close()
+
+    def _wake_source_processing(self) -> None:
+        """Signal committed journal growth to automatic processors.
+
+        The signal is best effort: a failed wake must never fail the caller's
+        committed write, and the Supervisor still observes durable state.
+        """
+
+        supervisor = self.artifact_processing_supervisor
+        if supervisor is None:
+            return
+        try:
+            supervisor.wake()
+        except Exception as error:
+            log_safely(
+                logger,
+                logging.WARNING,
+                "Source processing wake failed after a committed journal write",
+                exc_info=error,
+                extra={"event": "artifact_processing.wake_failed", "outcome": "committed"},
+            )
 
     async def capabilities(self) -> RuntimeCapabilities:
         async with self._operation():

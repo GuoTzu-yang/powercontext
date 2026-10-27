@@ -18,18 +18,19 @@ from __future__ import annotations
 
 import hashlib
 import io
+from collections import Counter
 from typing import Annotated
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
 from pypdf import PdfReader
 
-from powercontext.builtin.artifacts.memory.models import MemoryCitation
+from powercontext.builtin.artifacts.memory.models import MemoryCitation, MemoryHit
 from powercontext.builtin.runtime import GetMemoryEntryRequest, SearchMemoryRequest
 from powercontext.limits import MAX_SOURCE_ID_LENGTH
 from powercontext.sources import TEXT_EVIDENCE_PROJECTION_KEY, AdapterSourceDefinition, TextEvidence
 from powercontext.sources.models import Source, SourceMaterialization
-from powercontext.sources.pdf_rank import overlap_score, token_counts
+from powercontext.sources.pdf_rank import query_terms, rank_scores, token_counts
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 _IDENTITY_PREFIX = "pdf:"
@@ -185,6 +186,14 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 )
 
 
+_PRIMARY_SEARCH_LIMIT = 400
+_EXPANSION_SEARCH_LIMIT = 600
+# Hard request budget per question. The acceptance suite asks every published question in one
+# process, so widening recall must stay inside six Memory searches even on a multi-report scope.
+_MAX_SEARCHES_PER_QUESTION = 6
+_CITATION_SCAN_FACTOR = 4
+
+
 async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
     """Return up to ``limit`` citations to distinct PDF pages for one question."""
 
@@ -192,26 +201,104 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         raise ValueError("question must be a non-empty string")
     if limit < 1:
         raise ValueError("limit must be a positive integer")
-    request = SearchMemoryRequest(query=question, mode="fts", limit=max(limit * 20, 400))
-    result = await memory.search(request)
-    wanted = token_counts(question)
-    ranked: list[tuple[float, MemoryCitation]] = []
+    terms = query_terms(question)
+    try:
+        hits, counts = await _candidate_hits(memory, question, terms)
+    except Exception:  # noqa: BLE001 - widening retrieval must never lose the plain search
+        hits, counts = [], {}
+    if not hits:
+        return await _plain_citations(memory, question, limit)
+    scores = rank_scores([hit.text for hit in hits], terms, counts)
+    order = sorted(range(len(hits)), key=lambda index: (-scores[index], index))
+    return await _citations(memory, hits, order, limit)
+
+
+async def _candidate_hits(
+    memory, question: str, terms: tuple[str, ...]
+) -> tuple[list[MemoryHit], dict[str, Counter[str]]]:
+    """Collect a page pool with at most ``_MAX_SEARCHES_PER_QUESTION`` Memory searches.
+
+    One broad search covers the question as written. The remaining searches pair up the rarest
+    remaining terms: Memory admits a candidate only when it covers a share of the query terms,
+    so a two-term query still admits any page that carries either of them, which is what an
+    evidence page that shares only part of the question's vocabulary needs.
+    """
+
+    counts: dict[str, Counter[str]] = {}
+
+    def counts_for(text: str) -> Counter[str]:
+        bucket = counts.get(text)
+        if bucket is None:
+            bucket = token_counts(text)
+            counts[text] = bucket
+        return bucket
+
+    found: dict[str, MemoryHit] = {}
+    primary = await memory.search(
+        SearchMemoryRequest(query=question, mode="fts", limit=_PRIMARY_SEARCH_LIMIT)
+    )
+    for hit in primary.hits:
+        found.setdefault(hit.entry_id, hit)
+    searches = 1
+    if terms and searches < _MAX_SEARCHES_PER_QUESTION:
+        frequency: Counter[str] = Counter()
+        for hit in found.values():
+            seen = set(counts_for(hit.text))
+            for term in terms:
+                if term in seen:
+                    frequency[term] += 1
+        ordered = sorted(terms, key=lambda term: (frequency[term], term))
+        budget = 2 * (_MAX_SEARCHES_PER_QUESTION - searches)
+        for start in range(0, min(len(ordered), budget), 2):
+            query = " ".join(ordered[start : start + 2]).strip()
+            if not query:
+                continue
+            page = await memory.search(
+                SearchMemoryRequest(query=query, mode="fts", limit=_EXPANSION_SEARCH_LIMIT)
+            )
+            searches += 1
+            for hit in page.hits:
+                found.setdefault(hit.entry_id, hit)
+    return list(found.values()), counts
+
+
+async def _plain_citations(memory, question: str, limit: int) -> tuple[MemoryCitation, ...]:
+    """Fall back to the single-search behaviour when the widened pool is empty."""
+
+    page = await memory.search(
+        SearchMemoryRequest(query=question, mode="fts", limit=max(limit * 20, 400))
+    )
+    hits = list(page.hits)
+    return await _citations(memory, hits, list(range(len(hits))), limit)
+
+
+async def _citations(
+    memory, hits: list[MemoryHit], order: list[int], limit: int
+) -> tuple[MemoryCitation, ...]:
+    """Resolve ranked hits into citations to distinct, real pages."""
+
+    citations: list[MemoryCitation] = []
     seen: set[str] = set()
-    for hit in result.hits:
-        candidate = MemoryCitation(
+    scanned = 0
+    scan_budget = max(limit * _CITATION_SCAN_FACTOR, 64)
+    for index in order:
+        if len(citations) >= limit or scanned >= scan_budget:
+            break
+        scanned += 1
+        hit = hits[index]
+        citation = MemoryCitation(
             memory_ref=hit.memory_ref,
             entry_id=hit.entry_id,
             entry_version_id=hit.entry_version_id,
         )
-        entry = (await memory.get(GetMemoryEntryRequest(citation=candidate))).entry
+        entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
         for reference in entry.sources:
             if reference.source_type != PDF_PAGE_SOURCE_NAME or reference.source_id in seen:
                 continue
             seen.add(reference.source_id)
-            ranked.append((overlap_score(wanted, token_counts(entry.text)), candidate))
+            citations.append(citation)
             break
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return tuple(citation for _, citation in ranked[:limit])
+    return tuple(citations)
 
 
 __all__ = [

@@ -1,5 +1,7 @@
 # PowerContext
 
+[2026 训练营题目与公开自测](competition/README.md)
+
 Context for work that humans and agents hand off and continue.
 
 [![PyPI version](https://img.shields.io/pypi/v/powercontext)](https://pypi.org/project/powercontext/)

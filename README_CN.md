@@ -1,5 +1,7 @@
 # PowerContext
 
+[2026 训练营题目与公开自测](competition/README.md)
+
 为人和 Agent 交接并继续工作而生的上下文。
 
 [![PyPI version](https://img.shields.io/pypi/v/powercontext)](https://pypi.org/project/powercontext/)

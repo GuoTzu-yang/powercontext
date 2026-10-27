@@ -43,6 +43,9 @@ class ArtifactProcessingWorkAssignment:
     claimed_request_generation: int
     fence: ArtifactProcessingFence
     worker_id: str
+    # A Family admitted by pending journal identity stops re-admitting itself
+    # after one window until the remaining count reaches this threshold again.
+    source_count_threshold: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,33 @@ class ArtifactProcessingWorkerCompletion:
     hold_codes: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactProcessingCountPage:
+    """One keyset page of counted admission, independent of domain work."""
+
+    next_after_scope_id: str | None
+    admitted: tuple[str, ...] = ()
+    pending_input: bool = False
+
+
+class ArtifactProcessingCountProvider(Protocol):
+    """Accept Scopes whose pending journal identities reach a threshold.
+
+    Counting reads persisted journal metadata only; a provider must never run a
+    Family processor, build a model, or read a Source body.
+    """
+
+    async def admit(
+        self,
+        after_scope_id: str | None,
+        limit: int,
+        threshold: int,
+        /,
+        *,
+        fence: ArtifactProcessingFence,
+    ) -> ArtifactProcessingCountPage: ...
+
+
 class ArtifactProcessingWorkerHandle(Protocol):
     """One child whose termination completes only after its exit is observed."""
 
@@ -82,6 +112,8 @@ WorkerEntrypoint = Callable[[ArtifactProcessingWorkAssignment], ArtifactProcessi
 
 
 __all__ = [
+    "ArtifactProcessingCountPage",
+    "ArtifactProcessingCountProvider",
     "ArtifactProcessingWorkAssignment",
     "ArtifactProcessingWorkerCompletion",
     "ArtifactProcessingWorkerFailure",

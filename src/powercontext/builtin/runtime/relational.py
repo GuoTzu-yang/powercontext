@@ -1361,13 +1361,20 @@ class RelationalContexts:
         processing: ScopeInvocation | None = None,
         authorize_snapshot: MemorySnapshotAuthorizer | None = None,
         on_commit: MemoryCommitHook | None = None,
+        remaining_count_threshold: int | None = None,
     ) -> MemoryFlushResult:
         services = self._services_for(scope_id)
         return await _RelationalTriggers(
             services=services,
             lock=self._activation_locks.setdefault(services.scope_id, asyncio.Lock()),
             tracing=self._tracing,
-        ).flush(limit=limit, processing=processing, authorize_snapshot=authorize_snapshot, on_commit=on_commit)
+        ).flush(
+            limit=limit,
+            processing=processing,
+            authorize_snapshot=authorize_snapshot,
+            on_commit=on_commit,
+            remaining_count_threshold=remaining_count_threshold,
+        )
 
     async def incubate_experience(
         self,
@@ -1689,6 +1696,7 @@ class _RelationalTriggers:
         processing: ScopeInvocation | None = None,
         authorize_snapshot: MemorySnapshotAuthorizer | None = None,
         on_commit: MemoryCommitHook | None = None,
+        remaining_count_threshold: int | None = None,
     ) -> MemoryFlushResult:
         async with self._lock:
             async with self._services.database.transaction() as connection:
@@ -1749,7 +1757,16 @@ class _RelationalTriggers:
                         before = prepared.result if prepared.commit is None else prepared.commit.base
                         await on_commit(connection, before, updated)
                     if processing is not None:
-                        await processing.complete(connection, remaining_work=action.through < high_watermark)
+                        # A count-admitted run re-evaluates the *remaining*
+                        # identity count: one window still leaves the Scope
+                        # waiting until the threshold is reachable again.
+                        remaining = high_watermark - action.through
+                        await processing.complete(
+                            connection,
+                            remaining_work=remaining > 0
+                            if remaining_count_threshold is None
+                            else remaining >= remaining_count_threshold,
+                        )
             return MemoryFlushResult(
                 previous_cursor=action.after,
                 high_watermark=high_watermark,

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +32,12 @@ class _Vector:
 
 
 class CoalescingEmbeddingModel:
-    """Share in-flight text embeddings and reuse successful vectors."""
+    """Share in-flight text embeddings and reuse successful vectors.
+
+    Every distinct text owns one in-flight future from the moment a caller asks for it until the
+    batch carrying it settles. A caller that arrives while that batch is already running
+    subscribes to the same future instead of paying for a second provider request.
+    """
 
     def __init__(
         self,
@@ -53,8 +58,10 @@ class CoalescingEmbeddingModel:
         self._coalesce_seconds = float(coalesce_ms) / 1000.0
         self._cache_size = cache_size
         self._cache: OrderedDict[str, _Vector] = OrderedDict()
-        self._pending: dict[str, asyncio.Future[_Vector]] = {}
+        self._inflight: dict[str, asyncio.Future[_Vector]] = {}
+        self._queue: deque[str] = deque()
         self._runner: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._calls = 0
 
     @property
@@ -64,36 +71,39 @@ class CoalescingEmbeddingModel:
     async def embed(self, texts: tuple[str, ...], /) -> EmbeddingResult:
         if not texts:
             return EmbeddingResult(vectors=(), usage=InferenceUsage(requests=0))
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            # A wrapper reused from a second event loop must not hand out futures owned by a
+            # loop that is no longer running.
+            self._loop = loop
+            self._inflight.clear()
+            self._queue.clear()
+            self._runner = None
 
-        wanted: dict[str, _Vector] = {}
+        resolved: dict[str, _Vector] = {}
         waiters: list[tuple[str, asyncio.Future[_Vector]]] = []
-        for text in texts:
-            if text in wanted:
-                continue
+        for text in dict.fromkeys(texts):
             cached = self._cache.get(text)
             if cached is not None:
                 self._cache.move_to_end(text)
-                wanted[text] = cached
+                resolved[text] = cached
                 continue
-            future = self._pending.get(text)
+            future = self._inflight.get(text)
             if future is None:
-                future = asyncio.get_running_loop().create_future()
-                self._pending[text] = future
+                future = loop.create_future()
+                self._inflight[text] = future
+                self._queue.append(text)
                 self._ensure_runner()
             waiters.append((text, future))
 
         for text, future in waiters:
-            try:
-                wanted[text] = await asyncio.shield(future)
-            except asyncio.CancelledError:
-                raise
-            except BaseException:
-                raise
+            # ``shield`` keeps the shared work alive when this caller is cancelled.
+            resolved[text] = await asyncio.shield(future)
 
-        vectors = tuple(wanted[text].values for text in texts)
+        vectors = tuple(resolved[text].values for text in texts)
         used_calls: dict[int, InferenceUsage] = {}
-        for text in texts:
-            entry = wanted[text]
+        for text in dict.fromkeys(texts):
+            entry = resolved[text]
             if entry.call is None or entry.call in used_calls:
                 continue
             used_calls[entry.call] = entry.usage or InferenceUsage(requests=0)
@@ -112,40 +122,56 @@ class CoalescingEmbeddingModel:
         if self._runner is None or self._runner.done():
             self._runner = asyncio.get_running_loop().create_task(self._drain())
 
+    def _discard(self, text: str, future: asyncio.Future[_Vector] | None = None) -> None:
+        held = self._inflight.get(text)
+        if held is not None and (future is None or held is future):
+            del self._inflight[text]
+
+    def _settle_failure(self, batch: list[tuple[str, asyncio.Future[_Vector]]], error: BaseException) -> None:
+        for text, future in batch:
+            self._discard(text, future)
+            if not future.done():
+                future.set_exception(error)
+
     async def _drain(self) -> None:
         try:
-            while self._pending:
+            while self._queue:
                 if self._coalesce_seconds > 0:
                     await asyncio.sleep(self._coalesce_seconds)
-                batch = tuple(list(self._pending)[: self._max_batch_size])
-                futures = [self._pending.pop(text) for text in batch]
+                texts: list[str] = []
+                while self._queue and len(texts) < self._max_batch_size:
+                    text = self._queue.popleft()
+                    if text in self._inflight:
+                        texts.append(text)
+                if not texts:
+                    continue
+                batch = [(text, self._inflight[text]) for text in texts]
                 self._calls += 1
                 call = self._calls
                 try:
-                    result = await self._model.embed(batch)
+                    result = await self._model.embed(tuple(texts))
                 except asyncio.CancelledError:
-                    for future in futures:
+                    for text, future in batch:
+                        self._discard(text, future)
                         if not future.done():
                             future.cancel()
                     raise
                 except BaseException as error:  # noqa: BLE001 - propagated to every waiter
-                    for future in futures:
-                        if not future.done():
-                            future.set_exception(error)
+                    self._settle_failure(batch, error)
                     continue
-                if len(result.vectors) != len(batch):
-                    error = ValueError("embedding model returned an unexpected vector count")
-                    for future in futures:
-                        if not future.done():
-                            future.set_exception(error)
+                if len(result.vectors) != len(texts):
+                    self._settle_failure(
+                        batch, ValueError("embedding model returned an unexpected vector count")
+                    )
                     continue
-                for text, vector, future in zip(batch, result.vectors, futures):
-                    entry = _Vector(values=vector, usage=result.usage, call=call)
+                for (text, future), vector in zip(batch, result.vectors, strict=True):
                     self._store(text, _Vector(values=vector, usage=None, call=None))
+                    self._discard(text, future)
                     if not future.done():
-                        future.set_result(entry)
+                        future.set_result(_Vector(values=vector, usage=result.usage, call=call))
         finally:
-            self._runner = None
+            if self._runner is asyncio.current_task():
+                self._runner = None
 
     def _store(self, text: str, entry: _Vector) -> None:
         if self._cache_size <= 0:

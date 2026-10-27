@@ -85,6 +85,7 @@ from powercontext.builtin.persistence.memory_index import CompositeMemoryIndex, 
 from powercontext.builtin.persistence.oceanbase.experience_index import OceanBaseExperienceFTSIndex
 from powercontext.builtin.persistence.oceanbase.memory_index import (
     OceanBaseMemoryFTSIndex,
+    OceanBaseMemoryHybridIndex,
     OceanBaseMemoryVectorIndex,
 )
 from powercontext.builtin.persistence.oceanbase.profile import OceanBaseConfig, OceanBaseProfile
@@ -140,7 +141,11 @@ from powercontext.builtin.runtime.decision_model import (
 from powercontext.builtin.runtime.family_processing import FAMILY_BINDINGS, FamilyWorkerSpec, run_family_worker
 from powercontext.builtin.runtime.memory_write_gate import build_memory_write_gate
 from powercontext.builtin.runtime.models import MemorySearchMode, RuntimeCapabilities
-from powercontext.builtin.runtime.processing_discovery import SourceProcessingPendingProvider, enabled_profile_scopes
+from powercontext.builtin.runtime.processing_discovery import (
+    SourceCountProvider,
+    SourceProcessingPendingProvider,
+    enabled_profile_scopes,
+)
 from powercontext.builtin.runtime.processing_registry import (
     canonical_processing_manifest,
     dream_operations,
@@ -155,6 +160,7 @@ from powercontext.builtin.runtime.readiness import (
     dependency_readiness_probe,
 )
 from powercontext.builtin.runtime.recall_sufficiency import RecallSufficiencyPolicy
+from powercontext.builtin.persistence.source_lifecycle import SourceLifecycleStore
 from powercontext.builtin.runtime.relational import RelationalContexts
 from powercontext.builtin.runtime.topic_memory_processing import (
     TopicMemoryWorkerSpec,
@@ -650,6 +656,7 @@ async def open_builtin_runtime(
                 tracing=tracing,
                 scheduled_source_runner=scheduled_source_runner,
                 scheduled_experience_runner=scheduled_experience_runner,
+                source_lifecycle_store=SourceLifecycleStore(contexts.database),
                 remote_ingestion=contexts,
             )
         )
@@ -719,6 +726,15 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
         "profile": config.runtime.profile_schedule_enabled or None,
         "skill": None,
     }
+    counts = {
+        "memory": config.runtime.memory_source_count_threshold,
+        "topic-memory": config.runtime.topic_memory_source_count_threshold,
+    }
+    for family, threshold in counts.items():
+        if threshold is not None and family not in declared | registered:
+            raise BuiltinConfigurationError(
+                "scheduled-pipeline" if family == "memory" else "topic-memory-generation"
+            )
     for family, schedule in automatic.items():
         if schedule is not None and family not in declared | registered:
             if (
@@ -770,6 +786,7 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
         else:
             entrypoint = partial(run_family_worker, FamilyWorkerSpec(config=config, worker_security=worker_security))
         interval = None if family == "profile" else automatic[family]
+        count_threshold = counts.get(family)
         binding = canonical[family]
         configured.append(
             ArtifactProcessingBinding(
@@ -787,6 +804,10 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
                 if family == "skill"
                 else SourceProcessingPendingProvider(contexts.database, binding, family),
                 automatic_scope_filter=enabled_profile_scopes if family == "profile" else None,
+                source_count_threshold=count_threshold,
+                count_provider=None
+                if count_threshold is None
+                else SourceCountProvider(contexts.database, binding),
             )
         )
     _validate_processing_registrations(configured)
@@ -960,10 +981,13 @@ async def open_builtin_contexts(
                 await contexts.aclose_usage_recorder()
         return
     experience_index = OceanBaseExperienceFTSIndex()
-    indexes = [OceanBaseMemoryFTSIndex()]
-    if embedding_model is not None:
-        indexes.append(OceanBaseMemoryVectorIndex(embedding_model.profile))
-    index = CompositeMemoryIndex(*indexes)
+    # One native candidate statement per hybrid query: both candidate arms stay
+    # inside seekdb/OceanBase instead of being issued and merged by the client.
+    index: MemoryIndex = (
+        OceanBaseMemoryFTSIndex()
+        if embedding_model is None
+        else OceanBaseMemoryHybridIndex(embedding_model.profile)
+    )
     topic_indexes: list[TopicMemoryIndex] = [OceanBaseTopicMemoryFTSIndex()]
     if embedding_model is not None:
         topic_indexes.append(OceanBaseTopicMemoryVectorIndex(embedding_model.profile))

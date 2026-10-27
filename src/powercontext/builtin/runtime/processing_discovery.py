@@ -24,6 +24,7 @@ from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
 from powercontext.builtin.persistence.supervision import ArtifactProcessingFence, ArtifactProcessingLeaseRepository
 from powercontext.builtin.persistence.tables import PROFILE_POLICIES_TABLE, SOURCE_JOURNAL_HEADS_TABLE
+from powercontext.builtin.runtime.processing_contracts import ArtifactProcessingCountPage
 
 
 async def enabled_profile_scopes(connection: AsyncConnection, scope_ids: tuple[str, ...]) -> frozenset[str]:
@@ -74,3 +75,55 @@ class SourceProcessingPendingProvider:
                 if intent is None or intent.dirty_generation == intent.clean_generation:
                     await intents.mark_dirty(connection, scope, self._binding)
         return str(rows[-1][0]) if len(rows) == limit else None
+
+
+class SourceCountProvider:
+    """Accept one Scope per threshold crossing without reading a Source body.
+
+    The pending identity count is the distance between the persisted journal
+    head and the Family's last successful Source cursor. Replaying the same
+    Source identity never moves the head, so a duplicate capture adds nothing,
+    while a lineage-only entry owns a journal position and is counted here even
+    though the Family still excludes it from generation evidence.
+    """
+
+    def __init__(self, database: AsyncDatabase, binding_name: str) -> None:
+        self._database = database
+        self._binding = binding_name
+
+    async def admit(
+        self,
+        after_scope_id: str | None,
+        limit: int,
+        threshold: int,
+        /,
+        *,
+        fence: ArtifactProcessingFence,
+    ) -> ArtifactProcessingCountPage:
+        heads = SOURCE_JOURNAL_HEADS_TABLE
+        statement = select(heads.c.scope_id, heads.c.position).order_by(heads.c.scope_id).limit(limit)
+        if after_scope_id is not None:
+            statement = statement.where(heads.c.scope_id > after_scope_id)
+        admitted: list[str] = []
+        pending_input = False
+        async with self._database.transaction() as connection:
+            await ArtifactProcessingLeaseRepository().require_fence(connection, fence)
+            rows = (await connection.execute(statement)).all()
+            cursors = SourceCursorRepository()
+            intents = ArtifactProcessingIntentRepository()
+            for scope, head in rows:
+                cursor = await cursors.load(connection, scope, self._binding)
+                position = 0 if cursor is None else cursor.cursor.sequence
+                remaining = int(head) - position
+                if remaining < 1:
+                    continue
+                pending_input = True
+                if remaining < threshold:
+                    continue
+                if await intents.admit_counted(connection, scope, self._binding):
+                    admitted.append(str(scope))
+        return ArtifactProcessingCountPage(
+            next_after_scope_id=str(rows[-1][0]) if len(rows) == limit else None,
+            admitted=tuple(admitted),
+            pending_input=pending_input,
+        )
