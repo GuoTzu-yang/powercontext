@@ -1,0 +1,20 @@
+import { initDatabase, addDocuments, kbCount, getKbCollection, resetKbCollection } from "../server/db.mjs";
+
+await initDatabase("./.seekdb");
+await resetKbCollection();
+const vec = Array.from({ length: 384 }, (_, i) => (i === 0 ? 1 : 0.01));
+console.log("start count", await kbCount());
+await addDocuments({ docs: [{ id: "a", title: "a", text: "alpha one", vector: vec }] });
+console.log("after 1", await kbCount());
+await addDocuments({ docs: [{ id: "b", title: "b", text: "beta two", vector: vec }] });
+console.log("after 2 (incremental)", await kbCount());
+const col = await getKbCollection();
+const page = await col.get({ limit: 500, offset: 0 });
+console.log("get ids", JSON.stringify(page.ids));
+const empty = await col.get({ limit: 500, offset: 0, include: [] });
+console.log("get ids include=[]", JSON.stringify(empty.ids));
+await col.delete({ ids: ["a"] });
+console.log("after delete a", await kbCount());
+console.log("final reset", JSON.stringify(await resetKbCollection()));
+console.log("count after reset", await kbCount());
+process.exit(0);

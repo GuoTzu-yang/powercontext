@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>seekdb × 端侧推理 · 迷你知识库</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>seekdb × 端侧推理 · 迷你知识库</h1>
+      <p class="sub">
+        导入语料 → 浏览器本地向量化 → 写入 seekdb → seekdb 内混合检索（向量 + 全文，RRF 融合）
+      </p>
+      <div class="badges">
+        <span id="badge-backend" class="badge pending">推理后端：初始化中…</span>
+        <span id="badge-model" class="badge">模型：--</span>
+        <span id="badge-db" class="badge">seekdb：连接中…</span>
+        <span id="badge-docs" class="badge">文档数：--</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="card" id="card-import">
+        <h2>1 · 导入语料</h2>
+        <div class="row">
+          <button id="btn-sample">导入内置示例语料（12 条）</button>
+          <label class="file">
+            选择 .txt / .md 文件
+            <input id="file-input" type="file" accept=".txt,.md,.markdown" multiple />
+          </label>
+          <input id="batch-size" type="number" min="1" max="32" value="8" title="embedding 批大小" />
+          <span class="hint">批大小</span>
+        </div>
+        <textarea id="paste" rows="4" placeholder="或者直接粘贴文本，Ctrl+Enter 导入。较长的文本会按 220 字切块并保留 40 字重叠。"></textarea>
+        <div class="row">
+          <button id="btn-paste">导入粘贴文本</button>
+          <button id="btn-reset" class="ghost">重置知识库</button>
+          <span id="import-status" class="status"></span>
+        </div>
+        <div class="progress"><div id="import-bar" class="progress-fill"></div></div>
+      </section>
+
+      <section class="card" id="card-search">
+        <h2>2 · 语义 + 全文混合检索</h2>
+        <div class="row">
+          <input id="query" type="text" placeholder="输入问题，例如：浏览器不支持 WebGPU 时怎么办？" />
+          <input id="topk" type="number" min="1" max="20" value="5" title="返回条数" />
+          <button id="btn-search">检索</button>
+        </div>
+        <div id="search-meta" class="status"></div>
+        <ol id="results"></ol>
+      </section>
+
+      <section class="card" id="card-quant">
+        <h2>3 · 量化对比（INT8 / FP16 vs FP32 基线）</h2>
+        <p class="hint">
+          在 <b>同一后端</b>（WASM）下分别以 fp32 / q8(INT8) / fp16 运行同一份评测语料，
+          向量写入 seekdb 的独立集合，用 seekdb 的向量检索排序结果计算 Recall@3 与 nDCG@3。
+        </p>
+        <div class="row">
+          <button id="btn-quant">运行量化对比</button>
+          <span id="quant-status" class="status"></span>
+        </div>
+        <table id="quant-table">
+          <thead>
+            <tr>
+              <th>精度</th>
+              <th>模型体积</th>
+              <th>压缩比 vs fp32</th>
+              <th>向量化耗时（12 段）</th>
+              <th>Recall@3</th>
+              <th>nDCG@3</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card" id="card-perf">
+        <h2>4 · 分阶段耗时</h2>
+        <table id="perf-table">
+          <thead>
+            <tr><th>阶段</th><th>最近一次</th><th>说明</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </main>
+
+    <footer>
+      <span>推理位置：浏览器本地（Transformers.js / ONNX Runtime Web）。本应用不含任何云端推理调用。</span>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

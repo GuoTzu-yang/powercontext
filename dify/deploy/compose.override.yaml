@@ -1,0 +1,13 @@
+# ============================================================
+# 可选 override —— 仅为「地址可移植」：让容器能用 host.docker.internal
+# 放到 Dify 源码的 docker/ 目录，与官方 docker-compose.yaml 同级即可被自动合并
+#   docker compose -f docker-compose.yaml -f compose.override.yaml up -d
+# 若你不需要 host.docker.internal 这种写法，可完全不用本文件。
+# ============================================================
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

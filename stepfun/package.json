@@ -1,0 +1,30 @@
+{
+  "name": "stepfun-seekdb-kb",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "On-device embedding (Transformers.js, WebGPU/WASM) + seekdb hybrid retrieval mini knowledge base",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"node server/index.mjs\" \"vite --config vite.config.ts\"",
+    "dev:web": "vite --config vite.config.ts",
+    "dev:server": "node server/index.mjs",
+    "build": "vite build --config vite.config.ts",
+    "start": "node server/index.mjs",
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.7.5",
+    "@oceanbase/seekdb-node": "1.4.0",
+    "express": "^4.21.2",
+    "seekdb": "1.4.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  }
+}

@@ -1,0 +1,324 @@
+app:
+  description: 带长期记忆的互动剧情助手 —— Dify × PowerContext 记忆桥接
+  icon: 🧠
+  icon_background: '#FFEAD5'
+  icon_type: emoji
+  mode: advanced-chat
+  name: 剧情记忆助手
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/openai_api_compatible:0.0.73@4cf123ffaa4556f079bed6c47f3a462cc825504b859b183239e74eb19136a4b5
+    version: null
+kind: app
+site:
+  chat_color_theme: null
+  chat_color_theme_inverted: false
+  copyright: null
+  custom_disclaimer: ''
+  default_language: en-US
+  description: null
+  icon: 🧠
+  icon_background: '#FFEAD5'
+  icon_type: emoji
+  input_placeholder: null
+  privacy_policy: null
+  show_workflow_steps: true
+  title: 剧情记忆助手
+  use_icon_as_answer_icon: false
+version: 0.7.0
+workflow:
+  conversation_variables: []
+  environment_variables:
+  - description: PowerContext HTTP 桥接根地址（不带结尾斜杠）。换环境时只改这里。
+    id: pc-base-url
+    name: POWERCONTEXT_BASE_URL
+    selector:
+    - env
+    - POWERCONTEXT_BASE_URL
+    value: http://powercontext:8099
+    value_type: string
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: 🧠 记忆馆员已就绪。说一句话，我会记住它 —— 换个新会话再来找我，我仍然记得。
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions:
+    - 我是一名穿越到海底图书馆的旅人
+    - 你还记得我上次说了什么吗？
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: http-request
+      id: start-to-pc_search
+      source: start
+      sourceHandle: source
+      target: pc_search
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: llm
+      id: pc_search-to-llm
+      source: pc_search
+      sourceHandle: source
+      target: llm
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: http-request
+      id: llm-to-pc_remember
+      source: llm
+      sourceHandle: source
+      target: pc_remember
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: answer
+      id: pc_remember-to-answer
+      source: pc_remember
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: 开始
+        type: start
+        variables: []
+      height: 90
+      id: start
+      position:
+        x: 30
+        y: 260
+      positionAbsolute:
+        x: 30
+        y: 260
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - id: body_json
+            key: ''
+            type: text
+            value: '{"scope":"dify-{{#sys.user_id#}}","query":"{{#sys.query#}}","limit":5}'
+          type: json
+        default_value:
+        - key: body
+          type: string
+          value: '{"hits": []}'
+        - key: status_code
+          type: number
+          value: 0
+        - key: headers
+          type: object
+          value: {}
+        desc: 从 PowerContext 检索该用户的长期记忆（FTS）。失败时降级为空记忆，不阻断对话。
+        error_strategy: default-value
+        headers: 'Content-Type: application/json'
+        method: post
+        params: ''
+        retry_config:
+          enabled: true
+          exponential_backoff:
+            enabled: false
+            max_interval: 10000
+            multiplier: 2
+          max_retries: 2
+          retry_interval: 1000
+        selected: false
+        timeout:
+          connect: 10
+          read: 30
+          write: 30
+        title: PowerContext 记忆检索
+        type: http-request
+        url: '{{#env.POWERCONTEXT_BASE_URL#}}/search'
+        variables: []
+      height: 120
+      id: pc_search
+      position:
+        x: 330
+        y: 260
+      positionAbsolute:
+        x: 330
+        y: 260
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: MiniMax-M3.1-Flash，system 提示里注入记忆检索结果
+        memory:
+          query_prompt_template: '{{#sys.query#}}'
+          window:
+            enabled: false
+            size: 10
+        model:
+          completion_params:
+            max_tokens: 2048
+            temperature: 0.7
+          mode: chat
+          name: MiniMax-M3.1-Flash
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - role: system
+          text: '你是「记忆馆员」，一名与玩家共同推进连续冒险故事的叙事搭档。
+
+
+            【长期记忆检索结果（来自 PowerContext）】
+
+            {{#pc_search.body#}}
+
+
+            【回答规则】
+
+            1. 先判断检索结果中是否有与玩家本次输入语义相关的内容。
+
+            2. 若有：必须自然引用该记忆（例如「你上次提到……」），并在回答最后一行输出【记忆命中：是】。
+
+            3. 若无：把它当作故事的新起点继续推进，并在回答最后一行输出【记忆命中：否】。
+
+            4. 用简体中文回答，正文不超过 120 字，语气生动、有画面感。
+
+            '
+        - role: user
+          text: '{{#sys.query#}}'
+        selected: true
+        title: 剧情叙事 LLM
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 120
+      id: llm
+      position:
+        x: 630
+        y: 260
+      positionAbsolute:
+        x: 630
+        y: 260
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - id: body_json
+            key: ''
+            type: text
+            value: '{"scope":"dify-{{#sys.user_id#}}","text":"玩家：{{#sys.query#}} |
+              记忆馆员：{{#llm.text#}}"}'
+          type: json
+        default_value:
+        - key: body
+          type: string
+          value: '{"ok": false}'
+        - key: status_code
+          type: number
+          value: 0
+        - key: headers
+          type: object
+          value: {}
+        desc: 把本轮对话写回 PowerContext 长期记忆。失败时降级为「写失败但不影响回答」。
+        error_strategy: default-value
+        headers: 'Content-Type: application/json'
+        method: post
+        params: ''
+        retry_config:
+          enabled: true
+          exponential_backoff:
+            enabled: false
+            max_interval: 10000
+            multiplier: 2
+          max_retries: 2
+          retry_interval: 1000
+        selected: false
+        timeout:
+          connect: 10
+          read: 30
+          write: 30
+        title: PowerContext 记忆写入
+        type: http-request
+        url: '{{#env.POWERCONTEXT_BASE_URL#}}/remember'
+        variables: []
+      height: 120
+      id: pc_remember
+      position:
+        x: 930
+        y: 260
+      positionAbsolute:
+        x: 930
+        y: 260
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        answer: '{{#llm.text#}}'
+        desc: ''
+        selected: false
+        title: 直接回复
+        type: answer
+        variables: []
+      height: 100
+      id: answer
+      position:
+        x: 1230
+        y: 260
+      positionAbsolute:
+        x: 1230
+        y: 260
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+  rag_pipeline_variables: []
