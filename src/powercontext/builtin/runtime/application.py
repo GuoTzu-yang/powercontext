@@ -214,6 +214,7 @@ from powercontext.builtin.runtime.models import (
     TopicMemoryFlushResult,
 )
 from powercontext.builtin.runtime.prepared_code import PreparedCodeCandidate, code_candidates
+from powercontext.builtin.runtime.context_pack import ContextPack, ContextPackDelta
 from powercontext.builtin.runtime.prepared_context import (
     PreparedContextBuild,
     PreparedContextBuilder,
@@ -827,6 +828,21 @@ class ScopedContextApplication:
     def __init__(self, runtime: BuiltinRuntime, scope_id: str) -> None:
         self._runtime = runtime
         self.scope_id = validate_scope_id(scope_id)
+
+    async def prepare_incremental(
+        self,
+        request: PrepareContextRequest,
+        /,
+        *,
+        base_pack: ContextPack | None = None,
+    ) -> ContextPack | ContextPackDelta:
+        """Return a full pack, or a delta against ``base_pack`` when supplied."""
+
+        prepared = await self.prepare(request)
+        pack = ContextPack.from_content(prepared.content or "")
+        if base_pack is None:
+            return pack
+        return ContextPackDelta.between(base_pack, pack)
 
     async def prepare(
         self,
