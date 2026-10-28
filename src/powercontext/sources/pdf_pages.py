@@ -18,22 +18,34 @@ from __future__ import annotations
 
 import hashlib
 import io
-from collections import Counter
+import math
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, Field
 from pypdf import PdfReader
 
-from powercontext.builtin.artifacts.memory.models import MemoryCitation, MemoryHit
+from powercontext.builtin.artifacts.memory.models import MemoryCitation
 from powercontext.builtin.runtime import GetMemoryEntryRequest, SearchMemoryRequest
 from powercontext.limits import MAX_SOURCE_ID_LENGTH
 from powercontext.sources import TEXT_EVIDENCE_PROJECTION_KEY, AdapterSourceDefinition, TextEvidence
 from powercontext.sources.models import Source, SourceMaterialization
-from powercontext.sources.pdf_rank import query_terms, rank_scores, token_counts
+from powercontext.sources.pdf_rank import (
+    NARRATIVE_MODE_WEIGHTS,
+    NUMERIC_MODE_WEIGHTS,
+    bm25_score,
+    content_weights,
+    minmax,
+    numeric_intent,
+    numeric_prior,
+    routed_documents,
+    table_prior,
+    token_counts,
+)
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 _IDENTITY_PREFIX = "pdf:"
+_NARROW_SEARCH_LIMIT = 4000
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
 
@@ -186,12 +198,140 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 )
 
 
-_PRIMARY_SEARCH_LIMIT = 400
-_EXPANSION_SEARCH_LIMIT = 600
-# Hard request budget per question. The acceptance suite asks every published question in one
-# process, so widening recall must stay inside six Memory searches even on a multi-report scope.
-_MAX_SEARCHES_PER_QUESTION = 6
-_CITATION_SCAN_FACTOR = 4
+_SEARCH_CACHE: "dict[int, dict[str, object]]" = {}
+
+
+def _cache_for(memory: object) -> "dict[str, object]":
+    """Per-Memory page index; one Memory identity owns one scope's pages."""
+
+    cache = _SEARCH_CACHE.get(id(memory))
+    if cache is None:
+        cache = {
+            "loaded": False,
+            "dirty": True,
+            "citations": [],
+            "documents": [],
+            "pages": [],
+            "tokens": [],
+            "lengths": [],
+            "numeric": [],
+            "tables": [],
+            "idf": {},
+            "average": 0.0,
+            "entities": set(),
+            "entries": set(),
+            "documents_seen": set(),
+        }
+        _SEARCH_CACHE[id(memory)] = cache
+    return cache
+
+
+def _source_location(source_id: str) -> "tuple[str, int | None]":
+    """Recover the document id and page number from a page Source identity."""
+
+    raw = source_id[len(_IDENTITY_PREFIX):] if source_id.startswith(_IDENTITY_PREFIX) else source_id
+    parts = raw.rsplit(":", 2)
+    if len(parts) != 3:
+        return "", None
+    try:
+        page_number = int(parts[2])
+    except ValueError:
+        return "", None
+    return unquote(parts[0]), page_number
+
+
+def _remember_page(cache: "dict[str, object]", citation, source_id: str, text: str) -> bool:
+    """Append one page to the local index unless that page is already indexed."""
+
+    if source_id in cache["entities"]:
+        return False
+    document, page_number = _source_location(source_id)
+    if page_number is None:
+        return False
+    cache["entities"].add(source_id)
+    body = text.split("\n", 1)[1] if "\n" in text else text
+    counts = token_counts(body)
+    cache["citations"].append(citation)
+    cache["documents"].append(document)
+    cache["pages"].append(page_number)
+    cache["tokens"].append(counts)
+    cache["lengths"].append(sum(counts.values()))
+    cache["numeric"].append(numeric_prior(counts))
+    cache["tables"].append(table_prior(body))
+    cache["documents_seen"].add(document)
+    cache["dirty"] = True
+    return True
+
+
+def _refresh_statistics(cache: "dict[str, object]") -> None:
+    """Fit one idf table and average length over every indexed page."""
+
+    if not cache["dirty"]:
+        return
+    cache["dirty"] = False
+    tokens = cache["tokens"]
+    lengths = cache["lengths"]
+    total = len(tokens)
+    frequency: "dict[str, int]" = {}
+    for counts in tokens:
+        for term in counts:
+            frequency[term] = frequency.get(term, 0) + 1
+    total_length = sum(lengths)
+    cache["average"] = (total_length / total) if total else 0.0
+    cache["idf"] = {
+        term: math.log(1.0 + (total - count + 0.5) / (count + 0.5))
+        for term, count in frequency.items()
+    }
+
+
+async def _index_scope(memory: object, cache: "dict[str, object]") -> None:
+    """Enumerate every page this scope holds so ranking never depends on question order."""
+
+    if cache["loaded"]:
+        return
+    cache["loaded"] = True
+    try:
+        listing = await memory.list()
+    except Exception:  # noqa: BLE001 - a Memory without listing falls back to search
+        return
+    for record in listing.entries:
+        entry = record.entry
+        for reference in entry.sources:
+            if reference.source_type != PDF_PAGE_SOURCE_NAME:
+                continue
+            citation = MemoryCitation(
+                memory_ref=record.memory_ref,
+                entry_id=entry.entry_id,
+                entry_version_id=entry.entry_version_id,
+            )
+            _remember_page(cache, citation, reference.source_id, entry.text)
+            # one citation must resolve to exactly one page
+            break
+
+
+async def _absorb_pages(memory: object, question: str, cache: "dict[str, object]") -> None:
+    """Fallback: add unseen pages from one broad lexical search of the question."""
+
+    request = SearchMemoryRequest(query=question, mode="fts", limit=_NARROW_SEARCH_LIMIT)
+    result = await memory.search(request)
+    for hit in result.hits:
+        if hit.entry_id in cache["entries"]:
+            continue
+        cache["entries"].add(hit.entry_id)
+        candidate = MemoryCitation(
+            memory_ref=hit.memory_ref,
+            entry_id=hit.entry_id,
+            entry_version_id=hit.entry_version_id,
+        )
+        try:
+            entry = (await memory.get(GetMemoryEntryRequest(citation=candidate))).entry
+        except Exception:  # a stale head is simply not a candidate
+            continue
+        for reference in entry.sources:
+            if reference.source_type != PDF_PAGE_SOURCE_NAME:
+                continue
+            _remember_page(cache, candidate, reference.source_id, entry.text)
+            break
 
 
 async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
@@ -201,104 +341,59 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         raise ValueError("question must be a non-empty string")
     if limit < 1:
         raise ValueError("limit must be a positive integer")
-    terms = query_terms(question)
-    try:
-        hits, counts = await _candidate_hits(memory, question, terms)
-    except Exception:  # noqa: BLE001 - widening retrieval must never lose the plain search
-        hits, counts = [], {}
-    if not hits:
-        return await _plain_citations(memory, question, limit)
-    scores = rank_scores([hit.text for hit in hits], terms, counts)
-    order = sorted(range(len(hits)), key=lambda index: (-scores[index], index))
-    return await _citations(memory, hits, order, limit)
 
+    cache = _cache_for(memory)
+    await _index_scope(memory, cache)
+    if not cache["citations"]:
+        await _absorb_pages(memory, question, cache)
+    citations = cache["citations"]
+    if not citations:
+        return ()
 
-async def _candidate_hits(
-    memory, question: str, terms: tuple[str, ...]
-) -> tuple[list[MemoryHit], dict[str, Counter[str]]]:
-    """Collect a page pool with at most ``_MAX_SEARCHES_PER_QUESTION`` Memory searches.
+    _refresh_statistics(cache)
+    idf = cache["idf"]
+    average = cache["average"]
+    weights = content_weights(question)
+    if numeric_intent(question):
+        lexical_weight, numeric_weight, table_weight = NUMERIC_MODE_WEIGHTS
+    else:
+        lexical_weight, numeric_weight, table_weight = NARRATIVE_MODE_WEIGHTS
+    documents = cache["documents"]
+    pages = cache["pages"]
+    tokens = cache["tokens"]
+    lengths = cache["lengths"]
+    routed = routed_documents(question, frozenset(cache["documents_seen"]))
 
-    One broad search covers the question as written. The remaining searches pair up the rarest
-    remaining terms: Memory admits a candidate only when it covers a share of the query terms,
-    so a two-term query still admits any page that carries either of them, which is what an
-    evidence page that shares only part of the question's vocabulary needs.
-    """
-
-    counts: dict[str, Counter[str]] = {}
-
-    def counts_for(text: str) -> Counter[str]:
-        bucket = counts.get(text)
-        if bucket is None:
-            bucket = token_counts(text)
-            counts[text] = bucket
-        return bucket
-
-    found: dict[str, MemoryHit] = {}
-    primary = await memory.search(
-        SearchMemoryRequest(query=question, mode="fts", limit=_PRIMARY_SEARCH_LIMIT)
+    total = len(citations)
+    lexical = minmax(
+        [bm25_score(weights, tokens[index], lengths[index], idf, average) for index in range(total)]
     )
-    for hit in primary.hits:
-        found.setdefault(hit.entry_id, hit)
-    searches = 1
-    if terms and searches < _MAX_SEARCHES_PER_QUESTION:
-        frequency: Counter[str] = Counter()
-        for hit in found.values():
-            seen = set(counts_for(hit.text))
-            for term in terms:
-                if term in seen:
-                    frequency[term] += 1
-        ordered = sorted(terms, key=lambda term: (frequency[term], term))
-        budget = 2 * (_MAX_SEARCHES_PER_QUESTION - searches)
-        for start in range(0, min(len(ordered), budget), 2):
-            query = " ".join(ordered[start : start + 2]).strip()
-            if not query:
-                continue
-            page = await memory.search(
-                SearchMemoryRequest(query=query, mode="fts", limit=_EXPANSION_SEARCH_LIMIT)
-            )
-            searches += 1
-            for hit in page.hits:
-                found.setdefault(hit.entry_id, hit)
-    return list(found.values()), counts
+    numbers = minmax(cache["numeric"])
+    tables = minmax(cache["tables"])
 
-
-async def _plain_citations(memory, question: str, limit: int) -> tuple[MemoryCitation, ...]:
-    """Fall back to the single-search behaviour when the widened pool is empty."""
-
-    page = await memory.search(
-        SearchMemoryRequest(query=question, mode="fts", limit=max(limit * 20, 400))
-    )
-    hits = list(page.hits)
-    return await _citations(memory, hits, list(range(len(hits))), limit)
-
-
-async def _citations(
-    memory, hits: list[MemoryHit], order: list[int], limit: int
-) -> tuple[MemoryCitation, ...]:
-    """Resolve ranked hits into citations to distinct, real pages."""
-
-    citations: list[MemoryCitation] = []
-    seen: set[str] = set()
-    scanned = 0
-    scan_budget = max(limit * _CITATION_SCAN_FACTOR, 64)
-    for index in order:
-        if len(citations) >= limit or scanned >= scan_budget:
-            break
-        scanned += 1
-        hit = hits[index]
-        citation = MemoryCitation(
-            memory_ref=hit.memory_ref,
-            entry_id=hit.entry_id,
-            entry_version_id=hit.entry_version_id,
+    # Pages of the document the question names win over every other document's pages,
+    # then the weighted signals decide the order inside that partition.
+    ranked: "list[tuple[int, float, str, int, int]]" = []
+    for index in range(total):
+        preferred = 0 if routed is not None and documents[index] not in routed else 1
+        combined = (
+            lexical_weight * lexical[index]
+            + numeric_weight * numbers[index]
+            + table_weight * tables[index]
         )
-        entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
-        for reference in entry.sources:
-            if reference.source_type != PDF_PAGE_SOURCE_NAME or reference.source_id in seen:
-                continue
-            seen.add(reference.source_id)
-            citations.append(citation)
+        ranked.append((preferred, combined, documents[index], pages[index], index))
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+
+    chosen: "list[MemoryCitation]" = []
+    seen: "set[tuple[str, int]]" = set()
+    for _, _, document, page_number, index in ranked:
+        if (document, page_number) in seen:
+            continue
+        seen.add((document, page_number))
+        chosen.append(citations[index])
+        if len(chosen) >= limit:
             break
-    return tuple(citations)
+    return tuple(chosen)
 
 
 __all__ = [
