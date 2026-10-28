@@ -314,5 +314,76 @@
   render();
 })();
 </script>
+
+<!-- seekdb 同步面板：由 serve.py 提供 /api/*，纯 localStorage 打开时自动降级 -->
+<section id="seekdbPanel" style="max-width:860px;margin:24px auto 60px;padding:16px 20px;border:1px solid rgba(127,127,127,.28);border-radius:14px;font-size:14px">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <strong>seekdb 同步</strong>
+    <span id="dbBadge" style="padding:2px 10px;border-radius:99px;background:rgba(127,127,127,.18)">检测中…</span>
+    <span id="dbCount" style="opacity:.7"></span>
+    <button id="dbSync" type="button" style="margin-left:auto;padding:6px 14px;border-radius:8px;border:1px solid rgba(127,127,127,.35);background:transparent;cursor:pointer">同步本地卡片到 seekdb</button>
+  </div>
+  <p style="margin:10px 0 0;opacity:.72;line-height:1.6">
+    卡片同时写入 seekdb（MySQL 协议兼容）的 <code>study_cards</code> 表，换设备也能取回；
+    未启动 <code>serve.py</code> 时自动只用本地 localStorage。
+  </p>
+  <ul id="dbList" style="margin:10px 0 0;padding-left:18px;opacity:.8"></ul>
+</section>
+<script>
+(function () {
+  var badge = document.getElementById("dbBadge");
+  var count = document.getElementById("dbCount");
+  var list = document.getElementById("dbList");
+  var syncBtn = document.getElementById("dbSync");
+
+  function setBadge(text, ok) {
+    badge.textContent = text;
+    badge.style.background = ok ? "rgba(28,160,90,.18)" : "rgba(190,60,60,.16)";
+  }
+
+  function refresh() {
+    fetch("/api/health").then(function (r) { return r.json(); }).then(function (h) {
+      if (!h.ok) { setBadge("seekdb 未连接（本地模式）", false); return; }
+      setBadge("seekdb 已连接 " + h.host + ":" + h.port, true);
+      count.textContent = "库中 " + h.cards + " 张卡片";
+      return fetch("/api/cards").then(function (r) { return r.json(); }).then(function (d) {
+        list.innerHTML = "";
+        (d.cards || []).slice(0, 5).forEach(function (c) {
+          var li = document.createElement("li");
+          li.textContent = (c.title || "（无标题）");
+          list.appendChild(li);
+        });
+      });
+    }).catch(function () { setBadge("seekdb 未连接（本地模式）", false); });
+  }
+
+  syncBtn.addEventListener("click", function () {
+    var raw = localStorage.getItem("studyflow.cards.v1") || "[]";
+    var cards;
+    try { cards = JSON.parse(raw); } catch (e) { cards = []; }
+    if (!cards.length) { alert("本地还没有卡片"); return; }
+    var i = 0;
+    function next() {
+      if (i >= cards.length) { refresh(); return; }
+      var c = cards[i++];
+      fetch("/api/cards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: c.title || "",
+          background: c.bg || "",
+          method: c.method || "",
+          conclusion: c.result || "",
+          limitation: c.limit || "",
+          createdAt: c.createdAt
+        })
+      }).then(next).catch(next);
+    }
+    next();
+  });
+
+  refresh();
+})();
+</script>
 </body>
 </html>
