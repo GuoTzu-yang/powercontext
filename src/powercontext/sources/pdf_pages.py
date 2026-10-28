@@ -33,12 +33,15 @@ from powercontext.sources.models import Source, SourceMaterialization
 from powercontext.sources.pdf_rank import (
     NARRATIVE_MODE_WEIGHTS,
     NUMERIC_MODE_WEIGHTS,
+    STATEMENT_WEIGHT,
     bm25_score,
     content_weights,
     minmax,
     numeric_intent,
     numeric_prior,
+    page_statement_types,
     routed_documents,
+    statement_types,
     table_prior,
     token_counts,
 )
@@ -216,6 +219,7 @@ def _cache_for(memory: object) -> "dict[str, object]":
             "lengths": [],
             "numeric": [],
             "tables": [],
+            "statements": [],
             "idf": {},
             "average": 0.0,
             "entities": set(),
@@ -259,6 +263,7 @@ def _remember_page(cache: "dict[str, object]", citation, source_id: str, text: s
     cache["lengths"].append(sum(counts.values()))
     cache["numeric"].append(numeric_prior(counts))
     cache["tables"].append(table_prior(body))
+    cache["statements"].append(page_statement_types(body))
     cache["documents_seen"].add(document)
     cache["dirty"] = True
     return True
@@ -376,16 +381,24 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     )
     numbers = minmax(cache["numeric"])
     tables = minmax(cache["tables"])
+    wanted_statements = statement_types(question)
+    statements = cache["statements"]
 
     # Pages of the document the question names win over every other document's pages,
     # then the weighted signals decide the order inside that partition.
     ranked: "list[tuple[int, float, str, int, int]]" = []
     for index in range(total):
         preferred = 0 if routed is not None and documents[index] not in routed else 1
+        statement_bonus = (
+            STATEMENT_WEIGHT
+            if wanted_statements and (wanted_statements & statements[index])
+            else 0.0
+        )
         combined = (
             lexical_weight * lexical[index]
             + numeric_weight * numbers[index]
             + table_weight * tables[index]
+            + statement_bonus
         )
         ranked.append((preferred, combined, documents[index], pages[index], index))
     ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
