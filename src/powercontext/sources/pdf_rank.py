@@ -286,6 +286,62 @@ def document_id_parts(document_id: str) -> "tuple[str, str]":
     return "".join(company), year
 
 
+# --- statement-type prior -------------------------------------------------
+# A question almost never names the statement that answers it: "is the
+# operating margin improving" is answered by the income statement without ever
+# saying so.  Map the metric that the question asks about onto the statement
+# that reports it, then prefer pages whose heading is that statement.
+STATEMENT_WEIGHT = 0.6
+
+_STATEMENT_PATTERNS = {
+    "income": re.compile(
+        r"statements? of (operations|income)|income statements?|statements? of earnings"
+    ),
+    "balance": re.compile(r"balance sheets?"),
+    "cashflow": re.compile(r"statements? of cash flows?"),
+    "segment": re.compile(r"segment (information|reporting)|reportable segments?|business segments?"),
+    "notes": re.compile(r"notes to (the )?(consolidated )?financial statements"),
+    "equity": re.compile(
+        r"statements? of (stockholders|shareholders).? equity|statements? of equity"
+    ),
+}
+
+_STATEMENT_KEYWORDS = {
+    "income": re.compile(
+        r"\brevenue|\bsales\b|\bmargin\b|operating income|operating profit|\bearnings\b"
+        r"|gross profit|net income|\beps\b|diluted|cost of (goods|revenue|sales)|\bebit\b"
+    ),
+    "balance": re.compile(
+        r"liquidity|quick ratio|current ratio|inventor|receivable|payable|\bdebt\b"
+        r"|stockholders?.? equity|total assets|total liabilities|working capital"
+        r"|book value|leverage"
+    ),
+    "cashflow": re.compile(
+        r"capital expenditure|\bcapex\b|depreciation|amorti[sz]ation|free cash|cash flow"
+        r"|\bebitda\b|dividend|repurchas|buyback"
+    ),
+    "segment": re.compile(r"\bsegment|geograph|\bregion|business unit|reportable"),
+}
+
+_HEADING_LINES = 8
+
+
+def statement_types(question: str) -> "frozenset[str]":
+    """Statements that plausibly answer this question, inferred from its metrics."""
+
+    folded = question.casefold()
+    matches = [name for name, pattern in _STATEMENT_KEYWORDS.items() if pattern.search(folded)]
+    return frozenset(matches)
+
+
+def page_statement_types(text: str) -> "frozenset[str]":
+    """Statements this page is a heading of, read from its leading lines."""
+
+    heading = " ".join([line.strip() for line in text.split("\n") if line.strip()][:_HEADING_LINES])
+    folded = heading.casefold()
+    return frozenset(name for name, pattern in _STATEMENT_PATTERNS.items() if pattern.search(folded))
+
+
 def routed_documents(
     question: str,
     document_ids: "tuple[str, ...] | frozenset[str]",
@@ -416,6 +472,9 @@ __all__ = [
 
     "routed_documents",
     "table_prior",
+    "statement_types",
+    "page_statement_types",
+    "STATEMENT_WEIGHT",
     "terms",
     "token_counts",
 ]
