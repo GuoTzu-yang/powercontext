@@ -221,6 +221,7 @@ def _cache_for(memory: object) -> "dict[str, object]":
             "entities": set(),
             "entries": set(),
             "documents_seen": set(),
+            "fallback": False,
         }
         _SEARCH_CACHE[id(memory)] = cache
     return cache
@@ -293,6 +294,10 @@ async def _index_scope(memory: object, cache: "dict[str, object]") -> None:
     try:
         listing = await memory.list()
     except Exception:  # noqa: BLE001 - a Memory without listing falls back to search
+        cache["fallback"] = True
+        return
+    if not listing.entries:
+        cache["fallback"] = True
         return
     for record in listing.entries:
         entry = record.entry
@@ -344,7 +349,8 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
     cache = _cache_for(memory)
     await _index_scope(memory, cache)
-    if not cache["citations"]:
+    if cache["fallback"] or not cache["citations"]:
+        # a Memory that cannot be enumerated is queried question by question
         await _absorb_pages(memory, question, cache)
     citations = cache["citations"]
     if not citations:
