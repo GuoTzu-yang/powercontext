@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StudyFlow · 科研与学习效率工作台</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --line:#252d36; --fg:#e6edf3;
+    --muted:#8b98a5; --accent:#4ea1ff; --ok:#3fb950; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+       background:var(--bg);color:var(--fg)}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600}
+  header .sub{color:var(--muted);font-size:12px}
+  main{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+       gap:16px;padding:18px;max-width:1180px;margin:0 auto}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  h2{font-size:13px;margin:0 0 12px;color:var(--muted);font-weight:600;
+     letter-spacing:.04em;text-transform:uppercase}
+  #clock{font-size:44px;font-variant-numeric:tabular-nums;text-align:center;
+         margin:6px 0 14px;letter-spacing:1px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  button{background:#20272f;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+         padding:7px 13px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06121f;
+                 font-weight:600}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input,textarea,select{width:100%;background:#0f1419;color:var(--fg);
+        border:1px solid var(--line);border-radius:7px;padding:8px 10px;font:inherit;font-size:13px}
+  textarea{resize:vertical;min-height:62px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:9px;
+        background:#12171d}
+  .card h3{margin:0 0 5px;font-size:13px}
+  .card p{margin:0;color:var(--muted);font-size:12.5px;white-space:pre-wrap}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;
+       border:1px solid var(--line);color:var(--muted);margin-right:6px}
+  .empty{color:var(--muted);font-size:12.5px}
+  .stat{display:flex;justify-content:space-between;color:var(--muted);font-size:12.5px;
+        margin-top:10px;border-top:1px dashed var(--line);padding-top:9px}
+  .warn{color:var(--warn)}
+  footer{padding:14px 22px;color:var(--muted);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>StudyFlow</h1>
+  <span class="sub">科研与学习效率工作台 · 专注计时 / 论文速读卡片 / 本地存储 / 一键导出</span>
+</header>
+
+<main>
+  <section>
+    <h2>番茄专注</h2>
+    <div id="clock">25:00</div>
+    <div class="row" style="justify-content:center">
+      <button id="start" class="primary">开始</button>
+      <button id="pause" disabled>暂停</button>
+      <button id="reset">重置</button>
+    </div>
+    <label>专注时长（分钟）</label>
+    <input id="minutes" type="number" min="1" max="180" value="25">
+    <div class="stat">
+      <span>本次已完成番茄数</span><span id="pomos">0</span>
+    </div>
+    <div class="stat">
+      <span>累计专注</span><span id="totalFocus">0 分钟</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>论文速读卡片</h2>
+    <label>标题</label>
+    <input id="fTitle" placeholder="例：Attention Is All You Need">
+    <div class="grid2">
+      <div><label>背景 / 问题</label><textarea id="fBg"></textarea></div>
+      <div><label>方法</label><textarea id="fMethod"></textarea></div>
+      <div><label>结论</label><textarea id="fResult"></textarea></div>
+      <div><label>局限 / 可追问</label><textarea id="fLimit"></textarea></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="addCard" class="primary">保存卡片</button>
+      <button id="export">导出 JSON</button>
+      <button id="exportMd">导出 Markdown</button>
+      <button id="clearAll">清空</button>
+    </div>
+    <div class="stat"><span>已存卡片</span><span id="cardCount">0</span></div>
+  </section>
+
+  <section style="grid-column:1/-1">
+    <h2>卡片库</h2>
+    <div id="cards"><p class="empty">还没有卡片。填好上面的表单点「保存卡片」。</p></div>
+  </section>
+</main>
+
+<footer>单文件、零依赖、数据仅存本机 localStorage · StudyFlow</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORE_KEY = "studyflow.cards.v1";
+  var STAT_KEY  = "studyflow.stats.v1";
+
+  /* ---------- 存储 ---------- */
+  function load(key, fallback) {
+    try {
+      var raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (e) {
+      console.warn("读取失败，使用默认值", e);
+      return fallback;
+    }
+  }
+  function save(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (e) {
+      console.warn("写入失败（可能超出配额）", e);
+      return false;
+    }
+  }
+
+  /* ---------- 番茄钟 ---------- */
+  var timer = { left: 25 * 60, total: 25 * 60, id: null, running: false };
+  var stats = load(STAT_KEY, { pomodoros: 0, focusMinutes: 0 });
+
+  var clockEl = document.getElementById("clock");
+  var startBtn = document.getElementById("start");
+  var pauseBtn = document.getElementById("pause");
+  var resetBtn = document.getElementById("reset");
+  var minInput = document.getElementById("minutes");
+  var pomosEl = document.getElementById("pomos");
+  var totalEl = document.getElementById("totalFocus");
+
+  function fmt(sec) {
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+  function renderClock() {
+    clockEl.textContent = fmt(timer.left);
+    pomosEl.textContent = String(stats.pomodoros);
+    totalEl.textContent = stats.focusMinutes + " 分钟";
+  }
+  function tick() {
+    if (timer.left > 0) {
+      timer.left -= 1;
+      renderClock();
+      return;
+    }
+    stop();
+    stats.pomodoros += 1;
+    stats.focusMinutes += Math.round(timer.total / 60);
+    save(STAT_KEY, stats);
+    renderClock();
+    clockEl.textContent = "完成 ✓";
+    setTimeout(resetTimer, 1200);
+  }
+  function start() {
+    if (timer.running) return;
+    if (timer.left <= 0) timer.left = timer.total;
+    timer.running = true;
+    timer.id = setInterval(tick, 1000);
+    startBtn.disabled = true;
+    pauseBtn.disabled = false;
+  }
+  function pause() {
+    if (!timer.running) return;
+    clearInterval(timer.id);
+    timer.id = null;
+    timer.running = false;
+    startBtn.disabled = false;
+    pauseBtn.disabled = true;
+  }
+  function stop() {
+    if (timer.id) clearInterval(timer.id);
+    timer.id = null;
+    timer.running = false;
+    startBtn.disabled = false;
+    pauseBtn.disabled = true;
+  }
+  function resetTimer() {
+    stop();
+    var mins = parseInt(minInput.value, 10);
+    if (!(mins >= 1 && mins <= 180)) mins = 25;
+    timer.total = mins * 60;
+    timer.left = timer.total;
+    renderClock();
+  }
+
+  startBtn.addEventListener("click", start);
+  pauseBtn.addEventListener("click", pause);
+  resetBtn.addEventListener("click", function () { resetTimer(); });
+  minInput.addEventListener("change", function () {
+    if (!timer.running) resetTimer();
+  });
+
+  /* ---------- 卡片 ---------- */
+  var cards = load(STORE_KEY, []);
+  var listEl = document.getElementById("cards");
+  var countEl = document.getElementById("cardCount");
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function render() {
+    countEl.textContent = String(cards.length);
+    if (!cards.length) {
+      listEl.innerHTML = '<p class="empty">还没有卡片。填好上面的表单点「保存卡片」。</p>';
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      html += '<div class="card">'
+            + '<h3>' + esc(c.title || "（无标题）") + '</h3>'
+            + '<p><span class="tag">背景</span>' + esc(c.bg) + '</p>'
+            + '<p><span class="tag">方法</span>' + esc(c.method) + '</p>'
+            + '<p><span class="tag">结论</span>' + esc(c.result) + '</p>'
+            + '<p><span class="tag">局限</span>' + esc(c.limit) + '</p>'
+            + '<div class="row" style="margin-top:8px">'
+            + '<button data-del="' + i + '">删除</button></div>'
+            + '</div>';
+    }
+    listEl.innerHTML = html;
+  }
+
+  function readForm() {
+    return {
+      title: document.getElementById("fTitle").value.trim(),
+      bg: document.getElementById("fBg").value.trim(),
+      method: document.getElementById("fMethod").value.trim(),
+      result: document.getElementById("fResult").value.trim(),
+      limit: document.getElementById("fLimit").value.trim(),
+      savedAt: new Date().toISOString()
+    };
+  }
+  function clearForm() {
+    ["fTitle", "fBg", "fMethod", "fResult", "fLimit"].forEach(function (id) {
+      document.getElementById(id).value = "";
+    });
+  }
+
+  document.getElementById("addCard").addEventListener("click", function () {
+    var c = readForm();
+    if (!c.title && !c.bg && !c.method && !c.result && !c.limit) {
+      alert("至少填写一项再保存。");
+      return;
+    }
+    cards.unshift(c);
+    if (!save(STORE_KEY, cards)) alert("保存失败：本地存储不可用或已满。");
+    clearForm();
+    render();
+  });
+
+  listEl.addEventListener("click", function (ev) {
+    var attr = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-del");
+    if (attr === null || attr === undefined) return;
+    var idx = parseInt(attr, 10);
+    if (isNaN(idx)) return;
+    cards.splice(idx, 1);
+    save(STORE_KEY, cards);
+    render();
+  });
+
+  function download(name, text, mime) {
+    var blob = new Blob([text], { type: mime });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  document.getElementById("export").addEventListener("click", function () {
+    download("studyflow-cards.json",
+             JSON.stringify({ exportedAt: new Date().toISOString(), cards: cards }, null, 2),
+             "application/json");
+  });
+
+  document.getElementById("exportMd").addEventListener("click", function () {
+    var md = "# StudyFlow 论文速读卡片\n\n";
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      md += "## " + (c.title || "（无标题）") + "\n\n"
+          + "- **背景/问题**：" + (c.bg || "-") + "\n"
+          + "- **方法**：" + (c.method || "-") + "\n"
+          + "- **结论**：" + (c.result || "-") + "\n"
+          + "- **局限/可追问**：" + (c.limit || "-") + "\n\n";
+    }
+    download("studyflow-cards.md", md, "text/markdown");
+  });
+
+  document.getElementById("clearAll").addEventListener("click", function () {
+    if (!cards.length) return;
+    if (!confirm("确定清空全部 " + cards.length + " 张卡片？")) return;
+    cards = [];
+    save(STORE_KEY, cards);
+    render();
+  });
+
+  /* ---------- 初始化 ---------- */
+  resetTimer();
+  render();
+})();
+</script>
+</body>
+</html>
