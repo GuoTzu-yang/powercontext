@@ -154,9 +154,7 @@ NUMERIC_MODE_WEIGHTS = (0.50, 0.30, 0.20)  # lexical, numeric, table
 NARRATIVE_MODE_WEIGHTS = (0.58, 0.22, 0.20)  # lexical, numeric, table
 EXPANSION_WEIGHT = 0.5
 NUMERIC_SCALE = 0.25
-ROUTE_MIN_SCORE = 0.85
-ROUTE_RELATIVE_MARGIN = 0.95
-ROUTE_YEAR_MISMATCH = 0.55
+
 
 # Legacy weight names kept for callers that still import them.
 LEXICAL_WEIGHT = NUMERIC_MODE_WEIGHTS[0]
@@ -288,47 +286,36 @@ def document_id_parts(document_id: str) -> "tuple[str, str]":
     return "".join(company), year
 
 
-def route_scores(question: str, document_ids: "tuple[str, ...] | frozenset[str]") -> "dict[str, float]":
-    """Score how well each document id matches the company and year named in a question."""
+def routed_documents(
+    question: str,
+    document_ids: "tuple[str, ...] | frozenset[str]",
+) -> "frozenset[str] | None":
+    """Return the documents a question names, or ``None`` when routing is unsure.
+
+    The company name is the routing signal; the fiscal year only separates several
+    documents of the same company (``3M_2018_10K`` versus ``3M_2022_10K``) and never
+    drops the only candidate, because a report routinely discusses two fiscal years.
+    """
 
     folded = question.casefold()
     letters = _TERM_SEPARATOR.sub("", folded)
     words = set(_TERM.findall(folded))
     years = set(_YEAR.findall(folded))
-    scores: "dict[str, float]" = {}
+    matched: "list[tuple[str, str]]" = []
     for document_id in document_ids:
         company, year = document_id_parts(document_id)
         if not company:
             continue
-        if len(company) <= 4:
-            hit = company in words
-        else:
-            hit = company in letters
-        if not hit:
-            continue
-        if year and years:
-            scale = 1.0 if year in years else ROUTE_YEAR_MISMATCH
-        else:
-            scale = 1.0
-        scores[document_id] = scale
-    return scores
-
-
-def routed_documents(
-    question: str,
-    document_ids: "tuple[str, ...] | frozenset[str]",
-) -> "frozenset[str] | None":
-    """Return the documents a question names, or ``None`` when routing is unsure."""
-
-    scores = route_scores(question, document_ids)
-    if not scores:
+        hit = company in words if len(company) <= 4 else company in letters
+        if hit:
+            matched.append((document_id, year))
+    if not matched:
         return None
-    best = max(scores.values())
-    if best < ROUTE_MIN_SCORE:
-        return None
-    cutoff = max(best * ROUTE_RELATIVE_MARGIN, ROUTE_MIN_SCORE)
-    allowed = frozenset(document for document, score in scores.items() if score >= cutoff)
-    return allowed or None
+    if years:
+        same_year = [document for document, year in matched if year and year in years]
+        if same_year:
+            return frozenset(same_year)
+    return frozenset(document for document, _unused in matched)
 
 
 def minmax(values: "list[float]") -> "list[float]":
@@ -426,7 +413,7 @@ __all__ = [
     "overlap_score",
     "page_bigrams",
     "query_tokens",
-    "route_scores",
+
     "routed_documents",
     "table_prior",
     "terms",
