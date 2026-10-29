@@ -134,6 +134,34 @@ def _collect_prompt_files(config: Config, task: dict[str, Any], pack: dict[str, 
     return files
 
 
+def _safe_rel(config, path) -> str:
+    """把路径记成「相对项目根」的字符串；不在项目根内时退回绝对路径。
+
+    直接用 `Path.relative_to(config.root)` 会在「一边相对、一边绝对」时抛
+    ValueError，让 apply/ask 阶段整条流程中断。
+    """
+
+    try:
+        return str(Path(path).relative_to(config.root))
+    except ValueError:
+        return str(path)
+
+
+def _resolve_input_path(config, raw: str) -> Path:
+    """把用户给的路径解析成绝对路径：先按当前工作目录，再按项目根兜底。"""
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    from_cwd = Path.cwd() / candidate
+    if from_cwd.exists():
+        return from_cwd.resolve()
+    from_root = config.root / candidate
+    if from_root.exists():
+        return from_root.resolve()
+    return from_cwd.resolve()
+
+
 def cmd_ask(config: Config, args: argparse.Namespace) -> int:
     pack_path = config.record_dir / "context_pack.json"
     if not pack_path.is_file():
@@ -177,7 +205,7 @@ def cmd_ask(config: Config, args: argparse.Namespace) -> int:
             "task_id": pack["task"]["task_id"],
             "attempt": args.attempt,
             "patch_sha": sha,
-            "patch_path": str(patch_path.relative_to(config.root)),
+            "patch_path": _safe_rel(config, patch_path),
             "model": result.model,
             "usage": result.usage,
             "finish_reason": result.finish_reason,
@@ -193,8 +221,8 @@ def cmd_ask(config: Config, args: argparse.Namespace) -> int:
             "usage": result.usage,
             "latency_ms": result.latency_ms,
             "prompt_chars": len(prompt),
-            "prompt_path": str(prompt_path.relative_to(config.root)),
-            "patch_path": str(patch_path.relative_to(config.root)),
+            "prompt_path": _safe_rel(config, prompt_path),
+            "patch_path": _safe_rel(config, patch_path),
             "patch_sha": sha,
             "modified_paths": patch_tool.modified_paths(diff),
         }
@@ -204,7 +232,11 @@ def cmd_ask(config: Config, args: argparse.Namespace) -> int:
 
 # -------------------------------------------------------------------- apply
 def cmd_apply(config: Config, args: argparse.Namespace) -> int:
-    patch_path = Path(args.patch) if args.patch else config.record_dir / "patches" / "latest.diff"
+    patch_path = (
+        _resolve_input_path(config, args.patch)
+        if args.patch
+        else config.record_dir / "patches" / "latest.diff"
+    )
     if not patch_path.is_file():
         raise SystemExit(f"patch not found: {patch_path}")
     diff = patch_path.read_text(encoding="utf-8")
@@ -258,7 +290,7 @@ def cmd_apply(config: Config, args: argparse.Namespace) -> int:
             "event": state.EVENT_PATCH_APPLIED,
             "task_id": config.task_id,
             "patch_sha": sha,
-            "patch_path": str(patch_path.relative_to(config.root)),
+            "patch_path": _safe_rel(config, patch_path),
             "method": result.method,
             "changed_files": changed,
         },
@@ -269,8 +301,8 @@ def cmd_apply(config: Config, args: argparse.Namespace) -> int:
             "ok": True,
             "method": result.method,
             "changed_files": changed,
-            "snapshot_before": str((snapshots / "before").relative_to(config.root)),
-            "snapshot_after": str((snapshots / "after").relative_to(config.root)),
+            "snapshot_before": _safe_rel(config, snapshots / "before"),
+            "snapshot_after": _safe_rel(config, snapshots / "after"),
             "code_diff": "records/code_diff.txt",
             "code_diff_bytes": len(diff_text),
             "patch_sha": sha,
