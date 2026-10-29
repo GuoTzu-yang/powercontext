@@ -1,0 +1,8 @@
+
+
+# 密钥与运行期产物（不落库）
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
