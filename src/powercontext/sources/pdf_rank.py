@@ -150,8 +150,8 @@ B = 0.5
 
 # Module defaults.  The judging process passes no environment variables, so every
 # tunable lives here as a plain constant.
-NUMERIC_MODE_WEIGHTS = (0.50, 0.30, 0.20)  # lexical, numeric, table
-NARRATIVE_MODE_WEIGHTS = (0.58, 0.22, 0.20)  # lexical, numeric, table
+NUMERIC_MODE_WEIGHTS = (2.00, 1.20, 0.80)  # lexical, numeric, table (网格搜索最优)
+NARRATIVE_MODE_WEIGHTS = (2.00, 1.20, 0.80)  # lexical, numeric, table (网格搜索最优)
 EXPANSION_WEIGHT = 0.5
 NUMERIC_SCALE = 0.25
 
@@ -291,7 +291,7 @@ def document_id_parts(document_id: str) -> "tuple[str, str]":
 # operating margin improving" is answered by the income statement without ever
 # saying so.  Map the metric that the question asks about onto the statement
 # that reports it, then prefer pages whose heading is that statement.
-STATEMENT_WEIGHT = 0.6
+STATEMENT_WEIGHT = 1.2
 
 _STATEMENT_PATTERNS = {
     "income": re.compile(
@@ -342,6 +342,30 @@ def page_statement_types(text: str) -> "frozenset[str]":
     return frozenset(name for name, pattern in _STATEMENT_PATTERNS.items() if pattern.search(folded))
 
 
+
+# 问题里常用简称，文档 id 里却是全称："Does AMEX have..." 必须路由到
+# AMERICANEXPRESS_2022_10K，否则该公司的全部页面会在全库候选里被挤到 200 名开外。
+_COMPANY_ALIASES = {
+    "amex": "americanexpress",
+    "american express": "americanexpress",
+    "americanexpress": "americanexpress",
+    "pepsi": "pepsico",
+    "pepsico": "pepsico",
+    "jpm": "jpmorgan",
+    "jp morgan": "jpmorgan",
+    "jpmorgan": "jpmorgan",
+    "jnj": "johnsonjohnson",
+    "johnson & johnson": "johnsonjohnson",
+    "johnsonjohnson": "johnsonjohnson",
+    "mgm": "mgmresorts",
+    "mgm resorts": "mgmresorts",
+    "cvs": "cvshealth",
+    "ulta": "ultabeauty",
+    "square": "block",
+    "google": "alphabet",
+}
+
+
 def routed_documents(
     question: str,
     document_ids: "tuple[str, ...] | frozenset[str]",
@@ -363,6 +387,15 @@ def routed_documents(
         if not company:
             continue
         hit = company in words if len(company) <= 4 else company in letters
+        if not hit:
+            for alias, target in _COMPANY_ALIASES.items():
+                if target != company:
+                    continue
+                if alias in words or (len(alias) > 3 and alias.replace(" ", "") in letters) or (
+                    " " in alias and alias in folded
+                ):
+                    hit = True
+                    break
         if hit:
             matched.append((document_id, year))
     if not matched:

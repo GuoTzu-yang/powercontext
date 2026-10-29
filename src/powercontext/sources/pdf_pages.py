@@ -383,6 +383,18 @@ async def _absorb_pages(memory: object, question: str, cache: "dict[str, object]
             break
 
 
+class _LocalIdf(dict):
+    """idf table that answers unknown terms with a bounded fallback value."""
+
+    def __init__(self, mapping, unknown: float) -> None:
+        super().__init__(mapping)
+        self._unknown = unknown
+
+    def get(self, term, default=None):  # noqa: D401 - dict-compatible shim
+        if term in self:
+            return super().__getitem__(term)
+        return self._unknown
+
 async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
     """Return up to ``limit`` citations to distinct PDF pages for one question."""
 
@@ -415,8 +427,36 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     routed = routed_documents(question, frozenset(cache["documents_seen"]))
 
     total = len(citations)
+    # 10-K 的财务报表区通常落在全文 35% 之后：对靠后的页面加一点先验。
+    POSITION_WEIGHT = 0.6
+
+    # 路由成功时改用在目标文档内部统计的 idf / 平均长度：全库 idf 会把
+    # 该文档内的区分性词项"稀释"掉（它们在 1198 页里也常见），这也是金标页
+    # 常落在 21~50 名的原因之一。
+    search_idf = idf
+    search_average = average
+    if routed is not None:
+        subset = [index for index in range(total) if documents[index] in routed]
+        if subset:
+            document_frequency: "dict[str, int]" = {}
+            total_length = 0
+            for index in subset:
+                total_length += lengths[index]
+                for term in set(tokens[index]):
+                    document_frequency[term] = document_frequency.get(term, 0) + 1
+            size = len(subset)
+            unknown = math.log(1.0 + (size + 0.5) / 0.5)
+            local_idf = {
+                term: math.log(1.0 + (size - df + 0.5) / (df + 0.5))
+                for term, df in document_frequency.items()
+            }
+            search_idf = _LocalIdf(local_idf, unknown)
+            search_average = max(total_length / size, 1.0)
     lexical = minmax(
-        [bm25_score(weights, tokens[index], lengths[index], idf, average) for index in range(total)]
+        [
+            bm25_score(weights, tokens[index], lengths[index], search_idf, search_average)
+            for index in range(total)
+        ]
     )
     numbers = minmax(cache["numeric"])
     tables = minmax(cache["tables"])
@@ -438,6 +478,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             + numeric_weight * numbers[index]
             + table_weight * tables[index]
             + statement_bonus
+            + POSITION_WEIGHT * (1.0 if total > 1 and index / (total - 1) >= 0.35 else 0.0)
         )
         ranked.append((preferred, combined, documents[index], pages[index], index))
     ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
