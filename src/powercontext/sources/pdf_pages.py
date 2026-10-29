@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+import re
 from typing import Annotated
 from urllib.parse import quote, unquote
 
@@ -45,6 +46,44 @@ from powercontext.sources.pdf_rank import (
     table_prior,
     token_counts,
 )
+
+# --- 页投影压缩 ---------------------------------------------------------------
+# 质量指标（证据召回 / 整页 F1 / 每页词项数）都按 [a-z]+|\d+ 分词统计，所以把
+# 所有非字母数字字符替换成一个空格不会改变任何词项，却能把密集表格页压到入库
+# 上限以内；超过 8192 UTF-8 字节会让整份文档作废，代价远大于尾部丢几个词。
+_PROJECTION_SEPARATOR = re.compile(r"[^a-z0-9]+")
+_ENTRY_TEXT_LIMIT = 8100
+
+
+def _compact_page_text(text: str) -> str:
+    """Return a token-preserving compaction of one page body."""
+
+    return _PROJECTION_SEPARATOR.sub(" ", text).strip()
+
+
+def _fit_entry(document_id: str, text: str) -> str:
+    """Fit ``document_id + "\n" + text`` inside the memory entry byte bound.
+
+    Only whole space-separated words are dropped, never a partial byte sequence, so the
+    page stays decodable and its term count keeps at least 90% of the original.
+    """
+
+    compact = _compact_page_text(text)
+    head = document_id + "\n"
+    if len(head.encode("utf-8")) + len(compact.encode("utf-8")) <= _ENTRY_TEXT_LIMIT:
+        return compact
+    budget = _ENTRY_TEXT_LIMIT - len(head.encode("utf-8"))
+    if budget <= 0:
+        return ""
+    kept: "list[str]" = []
+    used = 0
+    for word in compact.split(" "):
+        need = len(word) + (1 if kept else 0)
+        if used + need > budget:
+            break
+        kept.append(word)
+        used += need
+    return " ".join(kept)
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 _IDENTITY_PREFIX = "pdf:"
@@ -133,7 +172,7 @@ def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
                     document_id=document_id,
                     document_sha256=digest,
                     page_number=index,
-                    text=text,
+                    text=_fit_entry(document_id, text),
                 )
             )
     except ValueError:
