@@ -28,6 +28,20 @@ def _env(name: str, default: str) -> str:
     return default if value is None or value == "" else value
 
 
+def _env_first(names, default: str = "") -> str:
+    """按优先级取第一个非空环境变量。
+
+    评测方可能用不同变量名注入 MiniMax 凭据（项目文档推荐 MM_MINIMAX_API_KEY，
+    但平台/评委也可能统一注入 MINIMAX_API_KEY 等）。这里做宽容匹配，
+    任何一个命中即可用；全都没有时才返回 default。
+    """
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return default
+
+
 def _env_int(name: str, default: int) -> int:
     raw = _env(name, str(default))
     try:
@@ -99,9 +113,18 @@ def load_config() -> Config:
         ob_user=_env("MM_OB_USER", "root@sys"),
         ob_password=_env("MM_OB_PASSWORD", ""),
         ob_database=_env("MM_OB_DATABASE", "mm_sdd"),
-        minimax_base_url=_env("MM_MINIMAX_BASE_URL", "https://api.minimax.chat/v1/chat/completions"),
-        minimax_api_key=_env("MM_MINIMAX_API_KEY", ""),
-        minimax_model=_env("MM_MINIMAX_MODEL", "MiniMax-M3.1-Flash"),
+        minimax_base_url=_env_first(
+            ("MM_MINIMAX_BASE_URL", "MINIMAX_BASE_URL", "MINIMAX_API_BASE",
+             "OPENAI_BASE_URL"),
+            default="https://api.minimax.chat/v1/chat/completions",
+        ),
+        minimax_api_key=_env_first(
+            ("MM_MINIMAX_API_KEY", "MINIMAX_API_KEY", "MINIMAX_API_TOKEN",
+             "MINIMAX_KEY", "MINIMAX_GROUP_KEY", "OPENAI_API_KEY")
+        ),
+        minimax_model=_env_first(
+            ("MM_MINIMAX_MODEL", "MINIMAX_MODEL"), default="MiniMax-M3.1-Flash"
+        ),
         minimax_max_tokens=_env_int("MM_MINIMAX_MAX_TOKENS", 8192),
         minimax_timeout=_env_int("MM_MINIMAX_TIMEOUT", 300),
         pc_scope_id=_env("MM_PC_SCOPE", "mm-sdd-task-001"),

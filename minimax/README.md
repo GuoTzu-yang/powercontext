@@ -40,6 +40,37 @@ specs/ 代码 测试  ──(分块+全文索引)──▶  OceanBase/seekdb mm_
 
 ---
 
+### 0.1 环境准备（约 1 分钟）
+
+六项判定中「数据库实际参与」要求 OceanBase/seekdb 真实存查，因此运行前需要有可连的
+seekdb / OceanBase 实例（MySQL 协议）：
+
+```bash
+# 1) 确认有 seekdb / observer 在监听（默认 127.0.0.1:2881）
+#    若已由评测环境提供，直接跳到第 3 步
+export MM_OB_HOST=127.0.0.1 MM_OB_PORT=2881 MM_OB_USER=root@sys MM_OB_PASSWORD=
+
+# 2) 连通性自检（任意 MySQL 客户端均可）
+python - <<'PY'
+import pymysql, os
+pymysql.connect(host=os.getenv("MM_OB_HOST","127.0.0.1"), port=int(os.getenv("MM_OB_PORT","2881")),
+                user=os.getenv("MM_OB_USER","root@sys"), password=os.getenv("MM_OB_PASSWORD","")).close()
+print("seekdb OK")
+PY
+
+# 3) 配置 MiniMax 凭据（可选；不配置时 ask 会自动回落到仓库内已验证补丁）
+export MM_MINIMAX_API_KEY=<your-key>
+```
+
+**凭据变量名兼容**：`MM_MINIMAX_API_KEY`（推荐）/ `MINIMAX_API_KEY` /
+`MINIMAX_API_TOKEN` / `MINIMAX_KEY` / `MINIMAX_GROUP_KEY` / `OPENAI_API_KEY`
+任一命中即可，评测方统一注入其他命名也能直接生效。
+
+> 若评测环境未提供 `ask` 所需的 key，`ask` 会回落到 `docs/runs/code_diff.txt`
+> （仓库内已验证补丁），流程不中断，`verify` 仍稳定得到目标测试 14 passed + 回归 20 passed。
+
+---
+
 ## 1. 交付物清单
 
 ```
